@@ -1,0 +1,86 @@
+---
+
+- name: Install dependencies
+  yum:
+    name:
+      - automake
+      - gcc-c++
+      - git
+      - libcurl-devel
+      - libxml2-devel
+      - make
+      - openssl-devel
+    state: present
+
+- name: Download fuse lib {{ s3fs_fuse_version }} package
+  unarchive:
+    src: https://github.com/libfuse/libfuse/releases/download/fuse-{{ s3fs_fuse_version }}/fuse-{{ s3fs_fuse_version }}.tar.gz
+    dest: /tmp
+    remote_src: True
+
+- name: Install latest fuse library
+  command:
+    cmd: "{{ item }}"
+    chdir: /tmp/fuse-{{ s3fs_fuse_version }}
+    creates: /usr/lib/pkgconfig/fuse.pc
+  with_items:
+    - ./configure --prefix=/usr
+    - make
+    - make install
+    - ldconfig
+  environment:
+    PKG_CONFIG_PATH: /usr/lib/pkgconfig:/usr/lib64/pkgconfig/
+
+- name: Clone s3fs repository
+  ansible.builtin.git:
+    repo: https://github.com/s3fs-fuse/s3fs-fuse.git
+    dest: /tmp/s3fs-fuse
+    version: master
+
+- name: Install s3fs-fuse
+  command:
+    cmd: "{{ item }}"
+    chdir: /tmp/s3fs-fuse
+    creates: /usr/local/bin/s3fs
+  with_items:
+    - ./autogen.sh
+    - ./configure
+    - make
+    - make install
+  environment:
+    PKG_CONFIG_PATH: /usr/lib/pkgconfig:/usr/lib64/pkgconfig/
+
+- name: Create mount directory
+  file:
+    state: directory
+    path: "{{ s3fs_fuse_mount_point }}"
+
+- name: Create s3fs config file
+  copy:
+    dest: /etc/passwd-s3fs
+    owner: root
+    group: root
+    mode: 0640
+    content: |
+      {{ s3fs_fuse_access_key_id }}:{{ s3fs_fuse_secret_access_key }}
+
+- name: See if {{ s3fs_fuse_mount_point }} is already mounted
+  command: mount
+  register: mount_list
+
+- name: Mount folder {{ s3fs_fuse_mount_point }} to s3 bucket {{ s3fs_fuse_bucket }} using s3fs
+  command: >
+    /usr/local/bin/s3fs
+    -o use_cache=/tmp/cache
+    -o url={{ s3fs_fuse_url }}
+    {% for option in s3fs_fuse_option_flags %}
+    -o {{ option }}
+    {% endfor %}
+    {{ s3fs_fuse_bucket }} {{ s3fs_fuse_mount_point }}
+  when: s3fs_fuse_mount_point not in mount_list.stdout
+
+- name: Add line to fstab
+  lineinfile:
+    path: /etc/rc.local
+    line: "/usr/local/bin/s3fs -o use_cache=/tmp/cache -o url={{ s3fs_fuse_url }}{% for option in s3fs_fuse_option_flags %} -o {{ option }}{% endfor %} {{ s3fs_fuse_bucket }} {{ s3fs_fuse_mount_point }}"
+    insertbefore: touch /var/lock/subsys/local
